@@ -46,7 +46,13 @@ def get_client():
     api_key = get_api_key()
     if not api_key:
         return None
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=10000,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
 
 
 def safe_error_summary(error):
@@ -68,40 +74,32 @@ class GeminiQuotaError(RuntimeError):
 
 def get_generation_models(client):
     """Discover Gemini models that support content generation and try Flash first."""
-    if "generation_models" in st.session_state:
-        return st.session_state.generation_models
+    if "generation_models" not in st.session_state:
+        models = [MODEL_NAME]
+        try:
+            for model in client.models.list():
+                name = getattr(model, "name", "") or ""
+                if not name.startswith("models/"):
+                    continue
+                model_id = name.removeprefix("models/")
+                if not model_id.startswith("gemini-"):
+                    continue
+                actions = getattr(model, "supported_actions", None)
+                if actions and not any("generateContent" in str(action) for action in actions):
+                    continue
+                if model_id not in models:
+                    models.append(model_id)
 
-    models = [MODEL_NAME]
-    try:
-        for model in client.models.list():
-            name = getattr(model, "name", "") or ""
-            if not name.startswith("models/"):
-                continue
-            model_id = name.removeprefix("models/")
-            if not model_id.startswith("gemini-"):
-                continue
-            actions = getattr(model, "supported_actions", None)
-            if actions and not any("generateContent" in str(action) for action in actions):
-                continue
-            if model_id not in models:
-                models.append(model_id)
-    except Exception:
-        # Model discovery can fail independently; still try the configured model.
-        pass
+        except Exception:
+            # Model discovery can fail independently; still try the configured model.
+            pass
 
-    # Always try Gemini 3.6 Flash first, then the last successful model and other Flash models.
-    active_model = st.session_state.get("active_model")
-    models = sorted(
-        models,
-        key=lambda name: (
-            name != MODEL_NAME,
-            name != active_model,
-            0 if "flash" in name.lower() else 1,
-            name,
-        ),
-    )
-    st.session_state.generation_models = models
-    return models
+        # Always try Gemini 3.6 Flash first, then Flash models and other Gemini models.
+        models.sort(key=lambda name: (name != MODEL_NAME, 0 if "flash" in name.lower() else 1, name))
+        st.session_state.generation_models = models
+
+    failed_models = set(st.session_state.get("failed_models", []))
+    return [name for name in st.session_state.generation_models if name not in failed_models]
 
 
 def generate_text(client, prompt, *, system_instruction=INTERVIEWER_INSTRUCTIONS):
@@ -127,14 +125,19 @@ def generate_text(client, prompt, *, system_instruction=INTERVIEWER_INSTRUCTIONS
             status = getattr(error, "status_code", None) or getattr(error, "code", None)
             if str(status) == "429":
                 quota_errors += 1
-                continue
-            if str(status) == "404":
-                continue
-            raise
+            # Authentication failures affect the whole project, so changing models
+            # cannot help. For other failures, move on immediately to the next model.
+            if str(status) in {"401", "403"}:
+                raise
+            failed = set(st.session_state.get("failed_models", []))
+            failed.add(model_name)
+            st.session_state.failed_models = list(failed)
 
+    # The next user retry should be allowed to recheck every model.
+    st.session_state.failed_models = []
     if quota_errors:
         raise GeminiQuotaError(
-            "Los modelos Gemini compatibles no están disponibles por cuota o límites de uso."
+            "Los modelos Gemini disponibles agotaron la cuota o los límites de uso."
         ) from last_error
     if last_error:
         raise last_error
@@ -223,6 +226,7 @@ def reset_interview():
         "interview_started",
         "active_model",
         "generation_models",
+        "failed_models",
     ):
         st.session_state.pop(key, None)
 
