@@ -49,6 +49,15 @@ def get_client():
     return genai.Client(api_key=api_key)
 
 
+def safe_error_summary(error):
+    """Return diagnostic metadata without exposing request data or credentials."""
+    error_type = type(error).__name__
+    status = getattr(error, "status_code", None) or getattr(error, "code", None)
+    if status is not None:
+        return f"{error_type} (código {status})"
+    return error_type
+
+
 def generate_text(client, prompt, *, system_instruction=INTERVIEWER_INSTRUCTIONS):
     response = client.models.generate_content(
         model=MODEL_NAME,
@@ -173,9 +182,13 @@ if "role" not in st.session_state:
         st.session_state.messages.append(
             {"role": "assistant", "content": st.session_state.question}
         )
-    except Exception:
+    except Exception as error:
         st.session_state.pop("role", None)
-        st.error("No se pudo iniciar la entrevista con Gemini. Revisa la API key y vuelve a intentarlo.")
+        detail = safe_error_summary(error)
+        st.error(
+            "No se pudo iniciar la entrevista con Gemini. "
+            f"Diagnóstico: {detail}. Revisa la API key, el acceso al modelo y vuelve a intentarlo."
+        )
         st.stop()
 
 # Changing the selected role starts a clean interview for that role.
@@ -249,8 +262,12 @@ elif user_answer := st.chat_input("Escribe tu respuesta técnica…"):
             else:
                 redirect = result["message"].strip() or f"Volvamos a la pregunta pendiente: {current_question}"
                 st.session_state.messages.append({"role": "assistant", "content": redirect})
-    except Exception:
+    except Exception as error:
         # Keep the question pending so a transient API failure cannot consume a turn.
         st.session_state.messages.pop()  # remove the user message from persistent history
-        st.error("No se pudo procesar la respuesta. La pregunta sigue pendiente; inténtalo de nuevo.")
+        detail = safe_error_summary(error)
+        st.error(
+            "No se pudo procesar la respuesta. "
+            f"Diagnóstico: {detail}. La pregunta sigue pendiente; inténtalo de nuevo."
+        )
     st.rerun()
