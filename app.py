@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 
 
-MODEL_NAME = "gemini-3.8-flash"
+MODEL_NAME = "gemini-3.6-flash"
 ROLES = [
     "Desarrollador Python Junior",
     "Desarrollador Web Frontend",
@@ -89,14 +89,14 @@ def get_generation_models(client):
         # Model discovery can fail independently; still try the configured model.
         pass
 
-    # Prefer the last successful model, then Flash for latency/cost, then the rest.
+    # Always try Gemini 3.6 Flash first, then the last successful model and other Flash models.
     active_model = st.session_state.get("active_model")
     models = sorted(
         models,
         key=lambda name: (
+            name != MODEL_NAME,
             name != active_model,
             0 if "flash" in name.lower() else 1,
-            name != MODEL_NAME,
             name,
         ),
     )
@@ -115,7 +115,6 @@ def generate_text(client, prompt, *, system_instruction=INTERVIEWER_INSTRUCTIONS
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    temperature=0.6,
                 ),
             )
             text = response.text
