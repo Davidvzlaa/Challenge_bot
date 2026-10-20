@@ -213,7 +213,17 @@ ni afirmes que hubo respuestas correctas si el transcript no lo demuestra.
 
 
 def reset_interview():
-    for key in ("role", "messages", "answers", "question", "finished", "report"):
+    for key in (
+        "role",
+        "messages",
+        "answers",
+        "question",
+        "finished",
+        "report",
+        "interview_started",
+        "active_model",
+        "generation_models",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -225,50 +235,71 @@ st.set_page_config(
 st.title("🤖 Simulador de Entrevistas Técnicas con IA")
 st.caption("Entrevista adaptativa de tres preguntas con Gemini")
 
+interview_started = st.session_state.get("interview_started", False)
 with st.sidebar:
-    st.header("Configuración")
-    selected_role = st.selectbox("Puesto al que postulas", ROLES)
-    if st.button("Reiniciar Entrevista", use_container_width=True):
-        reset_interview()
-        st.rerun()
+    st.header("Tu entrevista")
+    if interview_started:
+        st.markdown(f"**Área seleccionada:**  \n{st.session_state.role}")
+        if st.button("Reiniciar Entrevista", use_container_width=True):
+            reset_interview()
+            st.rerun()
+    else:
+        st.caption("Selecciona un área para comenzar tu práctica.")
 
 client = get_client()
-if client is None:
-    st.info(
-        "Configura `GEMINI_API_KEY` en los Secrets de Streamlit Cloud o como "
-        "variable de entorno para iniciar la entrevista."
+if not interview_started:
+    st.markdown("## 👋 ¡Hola! Soy tu Líder Técnico Virtual")
+    st.markdown(
+        "Te doy la bienvenida a esta simulación de entrevista técnica. "
+        "Te haré **tres preguntas adaptadas al área que elijas** y, al final, "
+        "recibirás una evaluación con fortalezas, oportunidades de mejora y un dictamen."
     )
+    with st.container(border=True):
+        st.markdown("### Antes de comenzar")
+        st.markdown(
+            "Elige la vacante que quieres practicar. Procura responder con tus propias "
+            "palabras y explicar cómo razonas; la entrevista se adapta a tus respuestas."
+        )
+        selected_role = st.selectbox("¿Qué área o puesto deseas practicar?", ROLES)
+        if st.button("Comenzar entrevista", type="primary", use_container_width=True):
+            if client is None:
+                st.error(
+                    "La entrevista no está configurada todavía. Añade `GEMINI_API_KEY` "
+                    "en los Secrets de Streamlit y vuelve a intentarlo."
+                )
+            else:
+                try:
+                    with st.spinner("Preparando tu entrevista…"):
+                        first_question = start_interview(client, selected_role)
+                    st.session_state.role = selected_role
+                    st.session_state.answers = []
+                    st.session_state.messages = [
+                        {"role": "assistant", "content": first_question}
+                    ]
+                    st.session_state.question = first_question
+                    st.session_state.finished = False
+                    st.session_state.interview_started = True
+                    st.rerun()
+                except Exception as error:
+                    detail = safe_error_summary(error)
+                    st.error(
+                        "No se pudo iniciar la entrevista. "
+                        f"Diagnóstico: {detail}. Revisa la cuota y disponibilidad de Gemini."
+                    )
+    st.stop()
+
+if client is None:
+    st.error("No se encontró `GEMINI_API_KEY`. Configúrala para continuar la entrevista.")
     st.stop()
 
 if "active_model" in st.session_state:
     st.caption(f"Modelo activo: `{st.session_state.active_model}`")
 
-if "role" not in st.session_state:
-    st.session_state.role = selected_role
-    st.session_state.answers = []
-    st.session_state.messages = []
-    st.session_state.finished = False
-    try:
-        st.session_state.question = start_interview(client, selected_role)
-        st.session_state.messages.append(
-            {"role": "assistant", "content": st.session_state.question}
-        )
-    except Exception as error:
-        st.session_state.pop("role", None)
-        detail = safe_error_summary(error)
-        st.error(
-            "No se pudo iniciar la entrevista con Gemini. "
-            f"Diagnóstico: {detail}. Revisa la API key, el acceso al modelo y vuelve a intentarlo."
-        )
-        st.stop()
-
-# Changing the selected role starts a clean interview for that role.
-if st.session_state.role != selected_role:
-    reset_interview()
-    st.rerun()
-
-st.markdown(f"**Puesto:** {st.session_state.role}")
-st.progress(len(st.session_state.answers) / 3, text=f"Preguntas respondidas: {len(st.session_state.answers)} de 3")
+st.markdown(f"**Área:** {st.session_state.role}")
+st.progress(
+    len(st.session_state.answers) / 3,
+    text=f"Preguntas respondidas: {len(st.session_state.answers)} de 3",
+)
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
