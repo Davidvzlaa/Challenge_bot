@@ -53,24 +53,93 @@ def safe_error_summary(error):
     """Return diagnostic metadata without exposing request data or credentials."""
     error_type = type(error).__name__
     status = getattr(error, "status_code", None) or getattr(error, "code", None)
+    if isinstance(error, GeminiQuotaError):
+        return "Se agotó la cuota disponible en los modelos Gemini (429)"
     if status is not None:
+        if str(status) == "429":
+            return "Cuota o límite de solicitudes de Gemini agotado (429)"
         return f"{error_type} (código {status})"
     return error_type
 
 
-def generate_text(client, prompt, *, system_instruction=INTERVIEWER_INSTRUCTIONS):
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=0.6,
+class GeminiQuotaError(RuntimeError):
+    """Raised after every available text-generation model has hit quota limits."""
+
+
+def get_generation_models(client):
+    """Discover Gemini models that support content generation and try Flash first."""
+    if "generation_models" in st.session_state:
+        return st.session_state.generation_models
+
+    models = [MODEL_NAME]
+    try:
+        for model in client.models.list():
+            name = getattr(model, "name", "") or ""
+            if not name.startswith("models/"):
+                continue
+            model_id = name.removeprefix("models/")
+            if not model_id.startswith("gemini-"):
+                continue
+            actions = getattr(model, "supported_actions", None)
+            if actions and not any("generateContent" in str(action) for action in actions):
+                continue
+            if model_id not in models:
+                models.append(model_id)
+    except Exception:
+        # Model discovery can fail independently; still try the configured model.
+        pass
+
+    # Prefer the last successful model, then Flash for latency/cost, then the rest.
+    active_model = st.session_state.get("active_model")
+    models = sorted(
+        models,
+        key=lambda name: (
+            name != active_model,
+            0 if "flash" in name.lower() else 1,
+            name != MODEL_NAME,
+            name,
         ),
     )
-    text = response.text
-    if not text:
-        raise RuntimeError("Gemini no devolvió una respuesta de texto.")
-    return text.strip()
+    st.session_state.generation_models = models
+    return models
+
+
+def generate_text(client, prompt, *, system_instruction=INTERVIEWER_INSTRUCTIONS):
+    last_error = None
+    quota_errors = 0
+    model_names = get_generation_models(client)
+    for model_name in model_names:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.6,
+                ),
+            )
+            text = response.text
+            if not text:
+                raise RuntimeError("Gemini no devolvió una respuesta de texto.")
+            st.session_state.active_model = model_name
+            return text.strip()
+        except Exception as error:
+            last_error = error
+            status = getattr(error, "status_code", None) or getattr(error, "code", None)
+            if str(status) == "429":
+                quota_errors += 1
+                continue
+            if str(status) == "404":
+                continue
+            raise
+
+    if quota_errors:
+        raise GeminiQuotaError(
+            "Los modelos Gemini compatibles no están disponibles por cuota o límites de uso."
+        ) from last_error
+    if last_error:
+        raise last_error
+    raise RuntimeError("No se encontraron modelos Gemini disponibles para generar contenido.")
 
 
 def start_interview(client, role):
@@ -171,6 +240,9 @@ if client is None:
         "variable de entorno para iniciar la entrevista."
     )
     st.stop()
+
+if "active_model" in st.session_state:
+    st.caption(f"Modelo activo: `{st.session_state.active_model}`")
 
 if "role" not in st.session_state:
     st.session_state.role = selected_role
